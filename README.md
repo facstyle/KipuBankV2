@@ -90,4 +90,4 @@ npx hardhat test
 👨‍💻 Autor
 Proyecto desarrollado por Felipe A. Cristaldo
 
-Para la materia de Blockchain y Contratos Inteligentes — [25/10/2025]
+[25/10/2025]
