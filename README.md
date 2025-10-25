@@ -5,7 +5,7 @@ KipuBankV2 es una refactorización y extensión de la bóveda personal original.
 
 Este proyecto simula un entorno de producción: seguro, escalable y auditable, aplicando patrones de diseño como control de acceso basado en roles, contabilidad multi-token y uso de errores personalizados.
 
-Mejoras Realizadas y Fundamento del Diseño
+* Mejoras Realizadas y Fundamento del Diseño
 
 💡 Resumen de Mejoras de Diseño en KipuBank V2
 
@@ -40,7 +40,7 @@ Componente Implementado: unchecked en contadores.
 
 Razón / Fundamento de Diseño: Evita el overflow checking (verificación de desbordamiento) en operaciones donde el overflow es lógicamente imposible, optimizando así el consumo de gas.
 
-Decisiones de Diseño Importantes
+*Decisiones de Diseño Importantes:
 
 Contabilidad Unificada en USD: Todos los saldos internos se convierten y comparan contra bankCapUSD usando 6 decimales (como USDC).
 
