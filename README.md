@@ -40,7 +40,7 @@ Componente Implementado: unchecked en contadores.
 
 Razón / Fundamento de Diseño: Evita el overflow checking (verificación de desbordamiento) en operaciones donde el overflow es lógicamente imposible, optimizando así el consumo de gas.
 
-*Decisiones de Diseño Importantes:
+* Decisiones de Diseño Importantes:
 
 Contabilidad Unificada en USD: Todos los saldos internos se convierten y comparan contra bankCapUSD usando 6 decimales (como USDC).
 
@@ -52,7 +52,7 @@ Custom Errors: Ahorro de gas y claridad profesional.
 
 Seguridad: Patrón checks-effects-interactions y nonReentrant en funciones críticas.
 
-Funciones Principales
+* Funciones Principales:
 
 deposit(address token, uint256 amount): Deposita ETH o ERC-20, actualiza balances internos y el total en USD.
 
