@@ -7,19 +7,38 @@ Este proyecto simula un entorno de producción: seguro, escalable y auditable, a
 
 Mejoras Realizadas y Fundamento del Diseño
 
-| Área de Mejora                     | Componente Implementado                    | Razón / Fundamento de Diseño                                                      
+💡 Resumen de Mejoras de Diseño en KipuBank V2
 
-| Soporte Multi-token y Contabilidad | Mappings Anidados (`vaults[user][token]`)  | Permite manejar múltiples activos de forma segura y escalable, asignando un saldo a cada par usuario-token.
+1. Soporte Multi-token y Contabilidad
+   
+Componente Implementado: Mappings Anidados (vaults[user][token]).
 
-| Control de Acceso                  | OpenZeppelin AccessControl                 | Rol `MANAGER_ROLE` reservado para funciones administrativas, evitando que usuarios normales manipulen 
-parámetros críticos. 
+Razón / Fundamento de Diseño: Permite manejar múltiples activos de forma segura y escalable, asignando un saldo a cada par usuario-token.
 
-| Límites Dinámicos                  | Oráculos Chainlink (AggregatorV3Interface) | Permite calcular `bankCapUSD` en USD y mantener el riesgo estable pese a la volatilidad de ETH o tokens.                   
+2. Control de Acceso
+Componente Implementado: OpenZeppelin AccessControl.
 
-| Seguridad de Tokens                | OpenZeppelin SafeERC20                     | Mitiga vulnerabilidades en transferencias ERC-20, incluso de tokens no conformes.                                         
-| Consistencia de Errores            | Errores Personalizados (Custom Errors)     | Más eficiente en gas y facilita la decodificación de errores por aplicaciones externas.                                    
+Razón / Fundamento de Diseño: El rol MANAGER_ROLE está reservado para funciones administrativas, evitando que usuarios normales manipulen parámetros críticos del contrato.
 
-| Eficiencia de Gas                  | `unchecked` en contadores                  | Evita overflow donde es seguro, optimizando el consumo de gas.                                                             
+3. Límites Dinámicos
+Componente Implementado: Oráculos Chainlink (AggregatorV3Interface).
+
+Razón / Fundamento de Diseño: Permite calcular el bankCapUSD en USD, lo que ayuda a mantener el riesgo estable pese a la volatilidad de ETH o de otros tokens soportados.
+
+4. Seguridad de Tokens
+Componente Implementado: OpenZeppelin SafeERC20.
+
+Razón / Fundamento de Diseño: Mitiga vulnerabilidades en transferencias ERC-20, incluso de tokens que no siguen estrictamente el estándar (tokens no conformes).
+
+5. Consistencia de Errores
+Componente Implementado: Errores Personalizados (Custom Errors).
+
+Razón / Fundamento de Diseño: El uso de errores personalizados es más eficiente en gas y facilita la decodificación de errores por parte de aplicaciones externas (DApps).
+
+6. Eficiencia de Gas
+Componente Implementado: unchecked en contadores.
+
+Razón / Fundamento de Diseño: Evita el overflow checking (verificación de desbordamiento) en operaciones donde el overflow es lógicamente imposible, optimizando así el consumo de gas.
 
 Decisiones de Diseño Importantes
 
