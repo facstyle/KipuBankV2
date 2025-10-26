@@ -1,111 +1,154 @@
-🏦 KipuBank V2: Bóveda Multi-Token con Contabilidad en USD
-💡 Descripción General del Proyecto
+# 💰 KipuBankV2
 
-KipuBankV2 es una refactorización y extensión de la bóveda personal original. Permite depositar y retirar ETH y cualquier token ERC-20, mientras que el límite global del banco (bankCapUSD) se controla en USD usando Chainlink Data Feeds.
+### Contrato bancario descentralizado con soporte multi-token, oráculos Chainlink y control de acceso basado en roles.
 
-Este proyecto simula un entorno de producción: seguro, escalable y auditable, aplicando patrones de diseño como control de acceso basado en roles, contabilidad multi-token y uso de errores personalizados.
+---
 
-* Mejoras Realizadas y Fundamento del Diseño
+## 🧩 Descripción General
 
-💡 Resumen de Mejoras de Diseño en KipuBank V2
+**KipuBankV2** es una evolución del contrato original **KipuBank**, diseñado para simular un banco descentralizado en la blockchain de Ethereum.  
+Esta versión incorpora **mejoras avanzadas en seguridad, arquitectura y escalabilidad**, aplicando buenas prácticas de Solidity y patrones de diseño modernos.
 
-1. Soporte Multi-token y Contabilidad
-   
-Componente Implementado: Mappings Anidados (vaults[user][token]).
+El contrato permite:
+- Depósitos y retiros tanto en **ETH** como en **tokens ERC-20**.
+- Conversión de valores en tiempo real a **USD**, utilizando **oráculos de Chainlink**.
+- Límite total de valor almacenado en el banco (“**bank cap**”) expresado en USD.
+- **Control de acceso por roles**, restringiendo operaciones administrativas.
+- **Manejo seguro de tokens** mediante `SafeERC20` y protección `ReentrancyGuard`.
 
-Razón / Fundamento de Diseño: Permite manejar múltiples activos de forma segura y escalable, asignando un saldo a cada par usuario-token.
+---
 
-2. Control de Acceso
-Componente Implementado: OpenZeppelin AccessControl.
 
-Razón / Fundamento de Diseño: El rol MANAGER_ROLE está reservado para funciones administrativas, evitando que usuarios normales manipulen parámetros críticos del contrato.
+---
 
-3. Límites Dinámicos
-Componente Implementado: Oráculos Chainlink (AggregatorV3Interface).
+## 🚀 Mejoras Principales
 
-Razón / Fundamento de Diseño: Permite calcular el bankCapUSD en USD, lo que ayuda a mantener el riesgo estable pese a la volatilidad de ETH o de otros tokens soportados.
+### 🧱 1. Control de Acceso
+Se utiliza **AccessControl** de OpenZeppelin para definir roles:
+- `DEFAULT_ADMIN_ROLE`: acceso completo al contrato.
+- `MANAGER_ROLE`: puede actualizar límites y oráculos.
 
-4. Seguridad de Tokens
-Componente Implementado: OpenZeppelin SafeERC20.
+Esto permite delegar funciones administrativas sin exponer la seguridad del sistema.
 
-Razón / Fundamento de Diseño: Mitiga vulnerabilidades en transferencias ERC-20, incluso de tokens que no siguen estrictamente el estándar (tokens no conformes).
+---
 
-5. Consistencia de Errores
-Componente Implementado: Errores Personalizados (Custom Errors).
+### 💱 2. Integración con Chainlink
+Cada token soportado puede tener un **oráculo de precio** asociado (por ejemplo, ETH/USD).  
+El contrato consulta estos feeds a través de la interfaz `AggregatorV3Interface`.
 
-Razón / Fundamento de Diseño: El uso de errores personalizados es más eficiente en gas y facilita la decodificación de errores por parte de aplicaciones externas (DApps).
+- Ejemplo del feed ETH/USD en **Sepolia**:
+0x694AA1769357215DE4FAC081bf1f309aDC325306
 
-6. Eficiencia de Gas
-Componente Implementado: unchecked en contadores.
 
-Razón / Fundamento de Diseño: Evita el overflow checking (verificación de desbordamiento) en operaciones donde el overflow es lógicamente imposible, optimizando así el consumo de gas.
+Esto permite expresar el valor total del banco en dólares y controlar límites en USD.
 
-* Decisiones de Diseño Importantes:
+---
 
-Contabilidad Unificada en USD: Todos los saldos internos se convierten y comparan contra bankCapUSD usando 6 decimales (como USDC).
+### 🧾 3. Contabilidad Interna Multi-token
+Los saldos se gestionan mediante:
+```solidity
+mapping(address => mapping(address => uint256)) public vaults;
 
-Uso de address(0) para ETH: Permite unificar la lógica de deposit y withdraw en un solo mapping.
+donde:
 
-totalBankUSDValue: Mantener un contador global en tiempo real evita loops costosos sobre usuarios y tokens.
+vaults[usuario][token] representa el balance individual por activo.
 
-Custom Errors: Ahorro de gas y claridad profesional.
+address(0) se usa para representar ETH.
 
-Seguridad: Patrón checks-effects-interactions y nonReentrant en funciones críticas.
+🧮 4. Conversión de Decimales
 
-* Funciones Principales:
+Los valores se normalizan a 6 decimales (USD_DECIMALS).
+La función _convertToUSD() convierte cualquier token o ETH a USD considerando:
 
-deposit(address token, uint256 amount): Deposita ETH o ERC-20, actualiza balances internos y el total en USD.
+Decimales del token (IERC20.decimals())
 
-withdraw(address token, uint256 amount): Retira ETH o ERC-20, actualiza balances internos y el total en USD.
+Decimales del feed de Chainlink (feed.decimals())
 
-setBankCapUSD(uint256 newCap): Solo MANAGER_ROLE. Cambia el límite global en USD.
+🔒 5. Seguridad y Buenas Prácticas
 
-setPriceFeed(address token, address feed): Solo MANAGER_ROLE. Configura el oráculo de Chainlink de un token y lo añade a la lista de soportados.
+Patrón Checks-Effects-Interactions.
 
-Despliegue e Interacción
-Requisitos
+Protección contra reentradas (ReentrancyGuard).
 
-Node.js + npm
+Transferencias seguras (SafeERC20).
 
-Hardhat o Remix
+Uso de constantes e inmutables donde corresponde.
 
-Variables de entorno .env con SEPOLIA_URL y PRIVATE_KEY
+Errores personalizados (e.g. Err_ZeroAmount, Err_TransferFailed).
 
-Feeds de Chainlink para ETH/USD y otros tokens
+🧪 Instrucciones de Despliegue
+✅ Requisitos
 
-Pasos
+Node.js y Hardhat instalados.
 
-Instalar dependencias:
+Cuenta configurada en Metamask.
+
+Acceso a la red de prueba Sepolia.
+
+API Key opcional de Etherscan (para verificación del contrato).
+
+📜 Pasos
+
+Clonar el repositorio
+
+git clone https://github.com/tu-usuario/KipuBankV2.git
+cd KipuBankV2
+
+
+Instalar dependencias
 
 npm install
 
 
-Compilar el contrato:
+Configurar tu archivo .env
 
-npx hardhat compile
+PRIVATE_KEY=tu_clave_privada
+SEPOLIA_RPC_URL=https://sepolia.infura.io/v3/tu_api_key
+ETHERSCAN_API_KEY=opcional
 
 
-Desplegar en Sepolia:
+Desplegar en Sepolia
 
 npx hardhat run scripts/deploy.js --network sepolia
 
 
-Parámetros del constructor:
+Ejemplo de salida
 
-bankCapUSD: Límite global en USD (ej.: 1,000,000 * 10^6)
+KipuBankV2 deployed to: 0xd60C38c6d83d1B6D58398eBD81ae18Bdd9282601
 
-_ethUsdPriceFeed: Dirección del feed ETH/USD en Sepolia
+🔍 Interacción Básica
+💰 Depositar ETH
+deposit(address(0), 1 ether);
 
-Verificar en Etherscan:
+💸 Retirar tokens
+withdraw(tokenAddress, 500 * 1e18);
 
-npx hardhat verify --network sepolia <DIRECCION_CONTRATO> <_ethUsdPriceFeed>
+⚖️ Actualizar límite del banco
+setBankCapUSD(2_000_000 * 1e6);
+
+📊 Establecer nuevo oráculo
+setPriceFeed(tokenAddress, chainlinkFeedAddress);
+
+📘 Decisiones de Diseño y Trade-offs
+
+Se priorizó claridad y seguridad sobre micro-optimizaciones de gas.
+
+Los feeds Chainlink se manejan por token, lo cual ofrece flexibilidad pero requiere gestión manual.
+
+supportedTokens se almacena en un array para simplicidad, aunque podría reemplazarse por un mapping(bool) si se busca optimización.
+
+La función _convertToUSD usa precisión decimal basada en USD_DECIMALS para consistencia con tokens tipo USDC/USDT.
+
+🌐 Dirección del Contrato en Testnet
+
+Red: Sepolia
+Dirección: 0xd60C38c6d83d1B6D58398eBD81ae18Bdd9282601
+
+Verificación: Exitosa vía Sourcify ✅
+
+👩‍💻 Autor
+
+Felipe
+Proyecto presentado para evaluación final del módulo de desarrollo en Solidity.
 
 
-Ejecutar pruebas:
-
-npx hardhat test
-
-Autor
-
-Felipe A. Cristaldo
-[25/10/2025]
