@@ -1,30 +1,29 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import "@openzeppelin/contracts/access/AccessControl.sol";
-import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
-import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
-import "@chainlink/contracts/src/v0.8/interfaces/AggregatorV3Interface.sol";
+// Importaciones corregidas a la forma absoluta "src/openzeppelin/..."
+// Se asume que ReentrancyGuard está en 'utils/' y AccessControl en 'access/'
+
+import "src/openzeppelin/access/AccessControl.sol";
+import "src/openzeppelin/utils/ReentrancyGuard.sol";
+
+import "src/openzeppelin/token/ERC20/IERC20.sol";
+import "src/openzeppelin/utils/SafeERC20.sol";
+
+// Se mantiene esta ruta relativa si interfaces/ AggregatorV3Interface.sol está al lado de openzeppelin/
+import "./interfaces/AggregatorV3Interface.sol"; 
 
 interface IERC20Decimals {
     function decimals() external view returns (uint8);
 }
 
-/// @title KipuBank V2 - Bóveda Multi-Token con contabilidad en USD.
-/// @notice Soporta depósitos y retiros de ETH y ERC-20, con límites globales en USD.
 contract KipuBankV2 is AccessControl, ReentrancyGuard {
     using SafeERC20 for IERC20;
 
-    // ---------------------------------------------------------
-    // 🏷️ Roles y Constantes
-    // ---------------------------------------------------------
     bytes32 public constant MANAGER_ROLE = keccak256("MANAGER_ROLE");
     address public constant ETH_ADDRESS = address(0);
     uint8 public constant USD_DECIMALS = 6;
 
-    // ---------------------------------------------------------
-    // ⚠️ Errores Personalizados
-    // ---------------------------------------------------------
     error Err_ZeroAmount();
     error Err_BankCapExceeded();
     error Err_InsufficientBalance();
@@ -33,26 +32,17 @@ contract KipuBankV2 is AccessControl, ReentrancyGuard {
     error Err_InvalidPrice();
     error Err_ETHValueMismatch();
     error Err_TransferFailed();
-    // ---------------------------------------------------------
-    // 🔔 Eventos
-    // ---------------------------------------------------------
+
     event Deposit(address indexed user, address indexed token, uint256 amount);
     event Withdraw(address indexed user, address indexed token, uint256 amount);
     event BankCapUpdated(uint256 newCapUSD);
     event PriceFeedSet(address indexed token, address indexed feed);
 
-    // ---------------------------------------------------------
-    // 🏦 Mappings y Variables de Estado
-    // ---------------------------------------------------------
-    mapping(address => mapping(address => uint256)) public vaults; // usuario => token => balance
-    mapping(address => AggregatorV3Interface) public priceFeeds;  // token => Chainlink feed
+    mapping(address => mapping(address => uint256)) public vaults;
+    mapping(address => AggregatorV3Interface) public priceFeeds;
     address[] public supportedTokens;
     uint256 public bankCapUSD;
     uint256 public totalBankUSDValue;
-
-    // ---------------------------------------------------------
-    // ⚙️ Constructor
-    // ---------------------------------------------------------
 
     constructor(uint256 _bankCapUSD, address _ethUsdPriceFeed) {
         _grantRole(DEFAULT_ADMIN_ROLE, msg.sender);
@@ -62,10 +52,6 @@ contract KipuBankV2 is AccessControl, ReentrancyGuard {
         priceFeeds[ETH_ADDRESS] = AggregatorV3Interface(_ethUsdPriceFeed);
         supportedTokens.push(ETH_ADDRESS);
     }
-
-    // ----------------------------
-    // 💰 Funciones Principales
-    // ----------------------------
 
     function deposit(address tokenAddress, uint256 amount) external payable nonReentrant {
         if (amount == 0) revert Err_ZeroAmount();
@@ -111,10 +97,6 @@ contract KipuBankV2 is AccessControl, ReentrancyGuard {
         emit Withdraw(msg.sender, tokenAddress, amount);
     }
 
-    // ----------------------------
-    // Funciones de Conversión
-    // ----------------------------
-
     function _convertToUSD(address tokenAddress, uint256 amount) internal view returns (uint256 usdValue) {
         AggregatorV3Interface feed = priceFeeds[tokenAddress];
         if (address(feed) == address(0)) revert Err_OracleNotFound();
@@ -125,13 +107,8 @@ contract KipuBankV2 is AccessControl, ReentrancyGuard {
         uint8 feedDecimals = feed.decimals();
         uint8 tokenDecimals = tokenAddress == ETH_ADDRESS ? 18 : IERC20Decimals(tokenAddress).decimals();
 
-        // Conversión: ajusta decimales del token y del feed a USD_DECIMALS
         usdValue = (amount * uint256(price) * (10 ** USD_DECIMALS)) / (10 ** (tokenDecimals + feedDecimals));
     }
-
-    // ----------------------------
-    // Admin
-    // ----------------------------
 
     function setBankCapUSD(uint256 newCap) external onlyRole(MANAGER_ROLE) {
         bankCapUSD = newCap;
@@ -143,10 +120,6 @@ contract KipuBankV2 is AccessControl, ReentrancyGuard {
         if (!_isSupportedToken(token)) supportedTokens.push(token);
         emit PriceFeedSet(token, feed);
     }
-
-    // ----------------------------
-    // Helpers
-    // ----------------------------
 
     function _isSupportedToken(address token) internal view returns (bool) {
         for (uint i = 0; i < supportedTokens.length; i++) {
