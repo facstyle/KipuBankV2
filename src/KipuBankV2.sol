@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-// Importaciones corregidas a la forma absoluta "src/openzeppelin/..."
+// Importaciones   "src/openzeppelin/..."
 // Se asume que ReentrancyGuard está en 'utils/' y AccessControl en 'access/'
 
 import "src/openzeppelin/access/AccessControl.sol";
@@ -130,3 +130,4 @@ contract KipuBankV2 is AccessControl, ReentrancyGuard {
 
     receive() external payable {}
 }
+
