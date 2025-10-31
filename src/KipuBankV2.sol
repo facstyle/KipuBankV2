@@ -1,224 +1,227 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-/// @author Felipe A. Cristaldo
-/// @title KipuBankV2
+import "@openzeppelin/contracts/access/AccessControl.sol";
+import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import "@chainlink/contracts/src/v0.8/interfaces/AggregatorV3Interface.sol";
 
-/* -------------------------------------------------------------------------- */
-/*                             📦 Importaciones                               */
-/* -------------------------------------------------------------------------- */
-// Se asume que las dependencias están ubicadas bajo `src/openzeppelin/`
-import "src/openzeppelin/access/AccessControl.sol";
-import "src/openzeppelin/utils/ReentrancyGuard.sol";
-import "src/openzeppelin/token/ERC20/IERC20.sol";
-import "src/openzeppelin/utils/SafeERC20.sol";
+/// @title KipuBank - Banco descentralizado multi-token con roles, oráculos y contabilidad en USD.
+/// @author Felipe A. Cristaldo (revisado por RemixAI)
+/// @notice Permite depósitos/retiros de ETH y ERC20 con límites dinámicos en USD (vía Chainlink).
+///         Soporte básico para USDC (1 USDC = 1 USD) y extensible a otros tokens con oráculos.
+contract KipuBank is AccessControl {
 
-// Interfaz Chainlink para feeds de precios
-import "./interfaces/AggregatorV3Interface.sol";
+    struct TokenConfig {
+        address tokenAddress;
+        uint8 decimals;
+        bool isSupported;
+    }
 
-/* -------------------------------------------------------------------------- */
-/*                         🧩 Interfaz de utilidad ERC20                      */
-/* -------------------------------------------------------------------------- */
-interface IERC20Decimals {
-    function decimals() external view returns (uint8);
-}
+    event Deposit(address indexed user, address indexed token, uint256 amount);
+    event Withdrawal(address indexed user, address indexed token, uint256 amount);
+    event TokenSupportAdded(address indexed token, uint8 decimals);
+    event BankCapUpdated(uint256 newCapUSD);
+    event OracleFeedAdded(address indexed token, address indexed feed);
 
-/* -------------------------------------------------------------------------- */
-/*                               💰 KipuBankV2                                */
-/* -------------------------------------------------------------------------- */
-/**
- * @title KipuBankV2
- * @notice Contrato bancario con soporte multi-token, integración Chainlink,
- *         control de acceso y límites basados en valor USD.
- * @dev    Mejora del contrato original KipuBank, orientado a producción.
- */
-contract KipuBankV2 is AccessControl, ReentrancyGuard {
+    error ErrInvalidOwner();
+    error ErrZeroAmount();
+    error ErrETHAmountMismatch(uint256 sent, uint256 expected);
+    error ErrInsufficientBalance();
+    error ErrErrInsufficientContractBalance(address token);
+    error ErrOverWithdrawalLimit(uint256 maxAllowedUSD);
+    error ErrBankCapReached(uint256 currentUSD, uint256 capUSD);
+    error ErrTokenNotSupported(address token);
+    error ErrTokenAlreadySupported(address token);
+    error ErrInvalidDecimals(uint8 decimals);
+    error ErrConversionFailed(address token);
+    error ErrOracleUnavailable();
+    error ErrAccessDenied(bytes32 role);
+
+    // Roles
+    bytes32 public constant ADMIN_ROLE = keccak256("ADMIN_ROLE");
+    bytes32 public constant ORACLE_MANAGER_ROLE = keccak256("ORACLE_MANAGER_ROLE");
+    bytes32 public constant TOKEN_MANAGER_ROLE = keccak256("TOKEN_MANAGER_ROLE");
+
+    // Configuración inmutable
+    address public immutable chainlinkETHUSDFeed;
+    uint256 public immutable USDC_DECIMALS = 6;
+   address public constant USDC_ADDRESS = 0x07865c6E87B9F70255377e024ace6630C1Eaa37F; // USDC Goerli Testnet
+
+    // Configuración mutable
+    uint256 public withdrawalLimitUSD;  // 8 decimales
+    uint256 public bankCapUSD;          // 8 decimales
+
+    mapping(address => TokenConfig) public tokenConfig;
+    mapping(address => mapping(address => uint256)) private _balances;
+    mapping(address => uint256) private _tokenTotalSupply;
+    mapping(address => address) public tokenToOracleFeed;
+
+    uint256 private _ethUSDPrice;       
+    uint256 private lastOracleUpdate;
+
+    uint256 private _depositCount;
+    uint256 private _withdrawalCount;
+
     using SafeERC20 for IERC20;
 
-    /* ---------------------------------------------------------------------- */
-    /*                              CONSTANTES                                */
-    /* ---------------------------------------------------------------------- */
-    bytes32 public constant MANAGER_ROLE = keccak256("MANAGER_ROLE");
-    address public constant ETH_ADDRESS = address(0);
-    uint8 public constant USD_DECIMALS = 6;
+    constructor(
+        address _chainlinkETHUSDFeed,
+        uint256 _initialBankCapUSD,
+        uint256 _initialWithdrawalLimitUSD
+    ) {
+        if (msg.sender == address(0)) revert ErrInvalidOwner();
+        if (_chainlinkETHUSDFeed == address(0)) revert ErrOracleUnavailable();
+        if (_initialBankCapUSD == 0 || _initialWithdrawalLimitUSD == 0) revert ErrZeroAmount();
 
-    /* ---------------------------------------------------------------------- */
-    /*                                 ERRORES                                */
-    /* ---------------------------------------------------------------------- */
-    error Err_ZeroAmount();
-    error Err_BankCapExceeded();
-    error Err_InsufficientBalance();
-    error Err_NotSupportedToken();
-    error Err_OracleNotFound();
-    error Err_InvalidPrice();
-    error Err_ETHValueMismatch();
-    error Err_TransferFailed();
+        _grantRole(ADMIN_ROLE, msg.sender);
+        _grantRole(ORACLE_MANAGER_ROLE, msg.sender);
+        _grantRole(TOKEN_MANAGER_ROLE, msg.sender);
 
-    /* ---------------------------------------------------------------------- */
-    /*                                 EVENTOS                                */
-    /* ---------------------------------------------------------------------- */
-    event Deposit(address indexed user, address indexed token, uint256 amount);
-    event Withdraw(address indexed user, address indexed token, uint256 amount);
-    event BankCapUpdated(uint256 newCapUSD);
-    event PriceFeedSet(address indexed token, address indexed feed);
+        chainlinkETHUSDFeed = _chainlinkETHUSDFeed;
+        bankCapUSD = _initialBankCapUSD;
+        withdrawalLimitUSD = _initialWithdrawalLimitUSD;
 
-    /* ---------------------------------------------------------------------- */
-    /*                                STORAGE                                 */
-    /* ---------------------------------------------------------------------- */
-    // Usuario => Token => Monto depositado
-    mapping(address => mapping(address => uint256)) public vaults;
-
-    // Token => Oráculo Chainlink
-    mapping(address => AggregatorV3Interface) public priceFeeds;
-
-    // Lista de tokens soportados
-    address[] public supportedTokens;
-
-    // Valor máximo en USD que puede tener el banco
-    uint256 public bankCapUSD;
-
-    // Valor total actual del banco expresado en USD
-    uint256 public totalBankUSDValue;
-
-    /* ---------------------------------------------------------------------- */
-    /*                              CONSTRUCTOR                               */
-    /* ---------------------------------------------------------------------- */
-    /**
-     * @param _bankCapUSD Capacidad máxima del banco expresada en USD (6 decimales)
-     * @param _ethUsdPriceFeed Dirección del oráculo ETH/USD de Chainlink
-     */
-    constructor(uint256 _bankCapUSD, address _ethUsdPriceFeed) {
-        _grantRole(DEFAULT_ADMIN_ROLE, msg.sender);
-        _grantRole(MANAGER_ROLE, msg.sender);
-
-        bankCapUSD = _bankCapUSD;
-        priceFeeds[ETH_ADDRESS] = AggregatorV3Interface(_ethUsdPriceFeed);
-        supportedTokens.push(ETH_ADDRESS);
+        _addTokenSupport(address(0), 18, true); // ETH
+        _addTokenSupport(USDC_ADDRESS, uint8(USDC_DECIMALS), true); // USDC Goerli
     }
 
-    /* ---------------------------------------------------------------------- */
-    /*                              DEPÓSITOS                                 */
-    /* ---------------------------------------------------------------------- */
-    /**
-     * @notice Permite depositar ETH o tokens ERC-20 en el banco.
-     * @param tokenAddress Dirección del token (usar address(0) para ETH)
-     * @param amount Cantidad a depositar
-     */
-    function deposit(address tokenAddress, uint256 amount)
-        external
-        payable
-        nonReentrant
-    {
-        if (amount == 0) revert Err_ZeroAmount();
+    function deposit(address token, uint256 amount) external payable {
+        if (amount == 0) revert ErrZeroAmount();
+        if (!tokenConfig[token].isSupported) revert ErrTokenNotSupported(token);
 
-        uint256 usdAmount = _convertToUSD(tokenAddress, amount);
-        if (totalBankUSDValue + usdAmount > bankCapUSD) revert Err_BankCapExceeded();
+        uint256 amountUSD = _toUSD(token, amount);
+        uint256 newTotalUSD = _getTotalBankValueUSD() + amountUSD;
+        if (newTotalUSD > bankCapUSD) revert ErrBankCapReached(newTotalUSD, bankCapUSD);
 
-        // Actualiza balances internos
-        unchecked {
-            vaults[msg.sender][tokenAddress] += amount;
-            totalBankUSDValue += usdAmount;
-        }
+        _balances[msg.sender][token] += amount;
+        _tokenTotalSupply[token] += amount;
+        _incrementDepositCount();
 
-        // Transferencias según tipo de activo
-        if (tokenAddress == ETH_ADDRESS) {
-            if (msg.value != amount) revert Err_ETHValueMismatch();
+        if (token == address(0)) {
+            if (msg.value != amount) revert ErrETHAmountMismatch(msg.value, amount);
         } else {
-            if (msg.value > 0) revert Err_ETHValueMismatch();
-            IERC20(tokenAddress).safeTransferFrom(msg.sender, address(this), amount);
-            if (!_isSupportedToken(tokenAddress)) supportedTokens.push(tokenAddress);
+            IERC20(token).safeTransferFrom(msg.sender, address(this), amount);
         }
 
-        emit Deposit(msg.sender, tokenAddress, amount);
+        emit Deposit(msg.sender, token, amount);
     }
 
-    /* ---------------------------------------------------------------------- */
-    /*                               RETIROS                                  */
-    /* ---------------------------------------------------------------------- */
-    /**
-     * @notice Permite retirar ETH o tokens ERC-20 previamente depositados.
-     * @param tokenAddress Dirección del token a retirar
-     * @param amount Cantidad a retirar
-     */
-    function withdraw(address tokenAddress, uint256 amount)
-        external
-        nonReentrant
-    {
-        if (amount == 0) revert Err_ZeroAmount();
+    function withdraw(address token, uint256 amount) external {
+        if (amount == 0) revert ErrZeroAmount();
+        if (!tokenConfig[token].isSupported) revert ErrTokenNotSupported(token);
+        if (amount > _balances[msg.sender][token]) revert ErrInsufficientBalance();
 
-        uint256 userBalance = vaults[msg.sender][tokenAddress];
-        if (userBalance < amount) revert Err_InsufficientBalance();
+        uint256 amountUSD = _toUSD(token, amount);
+        if (amountUSD > withdrawalLimitUSD) revert ErrOverWithdrawalLimit(withdrawalLimitUSD);
 
-        uint256 usdAmount = _convertToUSD(tokenAddress, amount);
+        _balances[msg.sender][token] -= amount;
+        _tokenTotalSupply[token] -= amount;
+        _incrementWithdrawalCount();
 
-        unchecked {
-            vaults[msg.sender][tokenAddress] -= amount;
-            totalBankUSDValue -= usdAmount;
-        }
-
-        if (tokenAddress == ETH_ADDRESS) {
-            (bool sent, ) = msg.sender.call{value: amount}("");
-            if (!sent) revert Err_TransferFailed();
+        if (token == address(0)) {
+            if (address(this).balance < amount) revert ErrErrInsufficientContractBalance(token);
+            payable(msg.sender).transfer(amount);
         } else {
-            IERC20(tokenAddress).safeTransfer(msg.sender, amount);
+            if (IERC20(token).balanceOf(address(this)) < amount) revert ErrErrInsufficientContractBalance(token);
+            IERC20(token).safeTransfer(msg.sender, amount);
         }
 
-        emit Withdraw(msg.sender, tokenAddress, amount);
+        emit Withdrawal(msg.sender, token, amount);
     }
 
-    /* ---------------------------------------------------------------------- */
-    /*                           FUNCIONES INTERNAS                           */
-    /* ---------------------------------------------------------------------- */
-    /**
-     * @dev Convierte un monto en el token indicado a su valor en USD.
-     */
-    function _convertToUSD(address tokenAddress, uint256 amount)
-        internal
-        view
-        returns (uint256 usdValue)
-    {
-        AggregatorV3Interface feed = priceFeeds[tokenAddress];
-        if (address(feed) == address(0)) revert Err_OracleNotFound();
-
-        (, int256 price, , , ) = feed.latestRoundData();
-        if (price <= 0) revert Err_InvalidPrice();
-
-        uint8 feedDecimals = feed.decimals();
-        uint8 tokenDecimals =
-            tokenAddress == ETH_ADDRESS ? 18 : IERC20Decimals(tokenAddress).decimals();
-
-        usdValue = (amount * uint256(price) * (10 ** USD_DECIMALS)) /
-            (10 ** (tokenDecimals + feedDecimals));
+    function updateETHPrice() external onlyRole(ORACLE_MANAGER_ROLE) {
+        (, int256 price, , uint256 updatedAt, ) = AggregatorV3Interface(chainlinkETHUSDFeed).latestRoundData();
+        if (price <= 0 || updatedAt <= lastOracleUpdate) revert ErrOracleUnavailable();
+        _ethUSDPrice = uint256(price);
+        lastOracleUpdate = updatedAt;
     }
 
-    /**
-     * @dev Verifica si un token está soportado por el banco.
-     */
-    function _isSupportedToken(address token) internal view returns (bool) {
-        for (uint256 i = 0; i < supportedTokens.length; i++) {
-            if (supportedTokens[i] == token) return true;
+    function addTokenSupport(address token, uint8 decimals) external onlyRole(TOKEN_MANAGER_ROLE) {
+        if (tokenConfig[token].isSupported) revert ErrTokenAlreadySupported(token);
+        if (decimals > 36) revert ErrInvalidDecimals(decimals);
+        _addTokenSupport(token, decimals, true);
+    }
+
+    function setTokenOracleFeed(address token, address feed) external onlyRole(ORACLE_MANAGER_ROLE) {
+        if (!tokenConfig[token].isSupported) revert ErrTokenNotSupported(token);
+        if (feed == address(0)) revert ErrOracleUnavailable();
+        tokenToOracleFeed[token] = feed;
+        emit OracleFeedAdded(token, feed);
+    }
+
+    function setBankCapUSD(uint256 newCapUSD) external onlyRole(ADMIN_ROLE) {
+        if (newCapUSD == 0) revert ErrZeroAmount();
+        bankCapUSD = newCapUSD;
+        emit BankCapUpdated(newCapUSD);
+    }
+
+    function setWithdrawalLimitUSD(uint256 newLimitUSD) external onlyRole(ADMIN_ROLE) {
+        if (newLimitUSD == 0) revert ErrZeroAmount();
+        withdrawalLimitUSD = newLimitUSD;
+    }
+
+    function getBalance(address user, address token) external view returns (uint256) {
+        return _balances[user][token];
+    }
+
+    function getTotalBankValueUSD() external view returns (uint256) {
+        return _getTotalBankValueUSD();
+    }
+
+    function getETHUSDPrice() external view returns (uint256) {
+        return _ethUSDPrice;
+    }
+
+    function isTokenSupported(address token) external view returns (bool) {
+        return tokenConfig[token].isSupported;
+    }
+
+    function getTokenConfig(address token) external view returns (TokenConfig memory) {
+        return tokenConfig[token];
+    }
+
+    function getTokenOracleFeed(address token) external view returns (address) {
+        return tokenToOracleFeed[token];
+    }
+
+    function getDepositCount() external view returns (uint256) {
+        return _depositCount;
+    }
+
+    function getWithdrawalCount() external view returns (uint256) {
+        return _withdrawalCount;
+    }
+
+    function _addTokenSupport(address token, uint8 decimals, bool isSupported) private {
+        tokenConfig[token] = TokenConfig(token, decimals, isSupported);
+        emit TokenSupportAdded(token, decimals);
+    }
+
+    function _toUSD(address token, uint256 amount) private view returns (uint256) {
+        if (token == address(0)) {
+            return (amount * _ethUSDPrice) / (10 ** 10);
+        } else if (token == USDC_ADDRESS) {
+            return amount / (10 ** (USDC_DECIMALS - 8));
+        } else {
+            revert ErrConversionFailed(token);
         }
-        return false;
     }
 
-    /* ---------------------------------------------------------------------- */
-    /*                           FUNCIONES ADMIN                              */
-    /* ---------------------------------------------------------------------- */
-    function setBankCapUSD(uint256 newCap) external onlyRole(MANAGER_ROLE) {
-        bankCapUSD = newCap;
-        emit BankCapUpdated(newCap);
+    function _getTotalBankValueUSD() private view returns (uint256) {
+        uint256 totalUSD = _toUSD(address(0), _tokenTotalSupply[address(0)]);
+        if (_tokenTotalSupply[USDC_ADDRESS] > 0) {
+            totalUSD += _toUSD(USDC_ADDRESS, _tokenTotalSupply[USDC_ADDRESS]);
+        }
+        return totalUSD;
     }
 
-    function setPriceFeed(address token, address feed) external onlyRole(MANAGER_ROLE) {
-        priceFeeds[token] = AggregatorV3Interface(feed);
-        if (!_isSupportedToken(token)) supportedTokens.push(token);
-        emit PriceFeedSet(token, feed);
+    function _incrementDepositCount() private {
+        unchecked { _depositCount++; }
     }
 
-    /* ---------------------------------------------------------------------- */
-    /*                                RECEIVER                                */
-    /* ---------------------------------------------------------------------- */
-    receive() external payable {}
+    function _incrementWithdrawalCount() private {
+        unchecked { _withdrawalCount++; }
+    }
 }
-
 
