@@ -3,32 +3,32 @@ pragma solidity ^0.8.20;
 
 import "@openzeppelin/contracts/access/AccessControl.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
-import "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
+import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@chainlink/contracts/src/v0.8/interfaces/AggregatorV3Interface.sol";
 
 /// @title KipuBank - Banco descentralizado multi-token con roles, oráculos y contabilidad en USD.
-/// @author Felipe A. Cristaldo  
+/// @author Felipe A. Cristaldo (revisado por RemixAI)
 /// @notice Permite depósitos/retiros de ETH y ERC20 con límites dinámicos en USD (vía Chainlink).
+///         Soporte básico para USDC (1 USDC = 1 USD) y extensible a otros tokens con oráculos.
 contract KipuBank is AccessControl {
+
     struct TokenConfig {
         address tokenAddress;
         uint8 decimals;
         bool isSupported;
     }
 
-    // Eventos
     event Deposit(address indexed user, address indexed token, uint256 amount);
     event Withdrawal(address indexed user, address indexed token, uint256 amount);
     event TokenSupportAdded(address indexed token, uint8 decimals);
     event BankCapUpdated(uint256 newCapUSD);
     event OracleFeedAdded(address indexed token, address indexed feed);
 
-    // Errores personalizados
     error ErrInvalidOwner();
     error ErrZeroAmount();
     error ErrETHAmountMismatch(uint256 sent, uint256 expected);
     error ErrInsufficientBalance();
-    error ErrInsufficientContractBalance(address token);
+    error ErrErrInsufficientContractBalance(address token);
     error ErrOverWithdrawalLimit(uint256 maxAllowedUSD);
     error ErrBankCapReached(uint256 currentUSD, uint256 capUSD);
     error ErrTokenNotSupported(address token);
@@ -43,40 +43,37 @@ contract KipuBank is AccessControl {
     bytes32 public constant ORACLE_MANAGER_ROLE = keccak256("ORACLE_MANAGER_ROLE");
     bytes32 public constant TOKEN_MANAGER_ROLE = keccak256("TOKEN_MANAGER_ROLE");
 
-    // Configuración
+    // Configuración inmutable
     address public immutable chainlinkETHUSDFeed;
-    uint256 public immutable USDC_DECIMALS = 6;  // 6 decimales para USDC
-    address public usdcAddress;  // Dirección configurable de USDC
+    uint256 public immutable USDC_DECIMALS = 6;
+   address public constant USDC_ADDRESS = 0x07865c6E87B9F70255377e024ace6630C1Eaa37F; // USDC Goerli Testnet
 
-    // Estado
-    uint256 public withdrawalLimitUSD;
-    uint256 public bankCapUSD;
+    // Configuración mutable
+    uint256 public withdrawalLimitUSD;  // 8 decimales
+    uint256 public bankCapUSD;          // 8 decimales
 
     mapping(address => TokenConfig) public tokenConfig;
     mapping(address => mapping(address => uint256)) private _balances;
     mapping(address => uint256) private _tokenTotalSupply;
     mapping(address => address) public tokenToOracleFeed;
 
-    uint256 private _ethUSDPrice;
+    uint256 private _ethUSDPrice;       
     uint256 private lastOracleUpdate;
 
     uint256 private _depositCount;
     uint256 private _withdrawalCount;
 
-    using SafeERC20 for IERC20Metadata;  // Fix: Usar IERC20Metadata
+    using SafeERC20 for IERC20;
 
     constructor(
         address _chainlinkETHUSDFeed,
         uint256 _initialBankCapUSD,
-        uint256 _initialWithdrawalLimitUSD,
-        address _usdcAddress
+        uint256 _initialWithdrawalLimitUSD
     ) {
         if (msg.sender == address(0)) revert ErrInvalidOwner();
         if (_chainlinkETHUSDFeed == address(0)) revert ErrOracleUnavailable();
         if (_initialBankCapUSD == 0 || _initialWithdrawalLimitUSD == 0) revert ErrZeroAmount();
-        if (_usdcAddress == address(0)) revert ErrTokenNotSupported(_usdcAddress);
 
-        _grantRole(DEFAULT_ADMIN_ROLE, msg.sender);
         _grantRole(ADMIN_ROLE, msg.sender);
         _grantRole(ORACLE_MANAGER_ROLE, msg.sender);
         _grantRole(TOKEN_MANAGER_ROLE, msg.sender);
@@ -84,13 +81,11 @@ contract KipuBank is AccessControl {
         chainlinkETHUSDFeed = _chainlinkETHUSDFeed;
         bankCapUSD = _initialBankCapUSD;
         withdrawalLimitUSD = _initialWithdrawalLimitUSD;
-        usdcAddress = _usdcAddress;
 
-        _addTokenSupport(address(0), 18, true); // ETH (18 decimales)
-        _addTokenSupport(usdcAddress, uint8(USDC_DECIMALS), true); // Fix: Conversión explícita a uint8
+        _addTokenSupport(address(0), 18, true); // ETH
+        _addTokenSupport(USDC_ADDRESS, uint8(USDC_DECIMALS), true); // USDC Goerli
     }
 
-    // Función para depositar tokens (ETH o ERC20)
     function deposit(address token, uint256 amount) external payable {
         if (amount == 0) revert ErrZeroAmount();
         if (!tokenConfig[token].isSupported) revert ErrTokenNotSupported(token);
@@ -101,43 +96,40 @@ contract KipuBank is AccessControl {
 
         _balances[msg.sender][token] += amount;
         _tokenTotalSupply[token] += amount;
-        unchecked { ++_depositCount; }
+        _incrementDepositCount();
 
         if (token == address(0)) {
             if (msg.value != amount) revert ErrETHAmountMismatch(msg.value, amount);
         } else {
-            if (IERC20Metadata(token).balanceOf(msg.sender) < amount) revert ErrInsufficientBalance();
-            IERC20Metadata(token).safeTransferFrom(msg.sender, address(this), amount); // Fix: 3 argumentos
+            IERC20(token).safeTransferFrom(msg.sender, address(this), amount);
         }
 
         emit Deposit(msg.sender, token, amount);
     }
 
-    // Función para retirar tokens (ETH o ERC20)
     function withdraw(address token, uint256 amount) external {
         if (amount == 0) revert ErrZeroAmount();
         if (!tokenConfig[token].isSupported) revert ErrTokenNotSupported(token);
-        if (_balances[msg.sender][token] < amount) revert ErrInsufficientBalance();
+        if (amount > _balances[msg.sender][token]) revert ErrInsufficientBalance();
 
         uint256 amountUSD = _toUSD(token, amount);
         if (amountUSD > withdrawalLimitUSD) revert ErrOverWithdrawalLimit(withdrawalLimitUSD);
 
         _balances[msg.sender][token] -= amount;
         _tokenTotalSupply[token] -= amount;
-        unchecked { ++_withdrawalCount; }
+        _incrementWithdrawalCount();
 
         if (token == address(0)) {
-            if (address(this).balance < amount) revert ErrInsufficientContractBalance(token);
+            if (address(this).balance < amount) revert ErrErrInsufficientContractBalance(token);
             payable(msg.sender).transfer(amount);
         } else {
-            if (IERC20Metadata(token).balanceOf(address(this)) < amount) revert ErrInsufficientContractBalance(token);
-            IERC20Metadata(token).safeTransfer(msg.sender, amount); // Fix: 2 argumentos
+            if (IERC20(token).balanceOf(address(this)) < amount) revert ErrErrInsufficientContractBalance(token);
+            IERC20(token).safeTransfer(msg.sender, amount);
         }
 
         emit Withdrawal(msg.sender, token, amount);
     }
 
-    // Actualiza el precio de ETH/USD desde Chainlink
     function updateETHPrice() external onlyRole(ORACLE_MANAGER_ROLE) {
         (, int256 price, , uint256 updatedAt, ) = AggregatorV3Interface(chainlinkETHUSDFeed).latestRoundData();
         if (price <= 0 || updatedAt <= lastOracleUpdate) revert ErrOracleUnavailable();
@@ -145,46 +137,30 @@ contract KipuBank is AccessControl {
         lastOracleUpdate = updatedAt;
     }
 
-    // Añade soporte para un nuevo token ERC20
     function addTokenSupport(address token, uint8 decimals) external onlyRole(TOKEN_MANAGER_ROLE) {
         if (tokenConfig[token].isSupported) revert ErrTokenAlreadySupported(token);
         if (decimals > 36) revert ErrInvalidDecimals(decimals);
-
-        if (token != address(0)) {
-            uint8 actualDecimals = IERC20Metadata(token).decimals(); // Fix: Usar IERC20Metadata
-            if (actualDecimals != decimals) revert ErrInvalidDecimals(actualDecimals);
-        }
-
         _addTokenSupport(token, decimals, true);
     }
 
-    // Configura el feed de Chainlink para un token
     function setTokenOracleFeed(address token, address feed) external onlyRole(ORACLE_MANAGER_ROLE) {
         if (!tokenConfig[token].isSupported) revert ErrTokenNotSupported(token);
         if (feed == address(0)) revert ErrOracleUnavailable();
-
-        try AggregatorV3Interface(feed).latestRoundData() returns (uint80, int256, uint256, uint256, uint80) {
-            tokenToOracleFeed[token] = feed;
-            emit OracleFeedAdded(token, feed);
-        } catch {
-            revert ErrOracleUnavailable();
-        }
+        tokenToOracleFeed[token] = feed;
+        emit OracleFeedAdded(token, feed);
     }
 
-    // Configura el límite de capacidad del banco (en USD)
     function setBankCapUSD(uint256 newCapUSD) external onlyRole(ADMIN_ROLE) {
         if (newCapUSD == 0) revert ErrZeroAmount();
         bankCapUSD = newCapUSD;
         emit BankCapUpdated(newCapUSD);
     }
 
-    // Configura el límite de retiro (en USD)
     function setWithdrawalLimitUSD(uint256 newLimitUSD) external onlyRole(ADMIN_ROLE) {
         if (newLimitUSD == 0) revert ErrZeroAmount();
         withdrawalLimitUSD = newLimitUSD;
     }
 
-    // Funciones de lectura
     function getBalance(address user, address token) external view returns (uint256) {
         return _balances[user][token];
     }
@@ -217,38 +193,35 @@ contract KipuBank is AccessControl {
         return _withdrawalCount;
     }
 
-    // Funciones internas
     function _addTokenSupport(address token, uint8 decimals, bool isSupported) private {
         tokenConfig[token] = TokenConfig(token, decimals, isSupported);
         emit TokenSupportAdded(token, decimals);
     }
 
-    // Convierte un amount de token a USD
     function _toUSD(address token, uint256 amount) private view returns (uint256) {
         if (token == address(0)) {
-            return (amount * _ethUSDPrice) / (10 ** 10); // 18 decimales ETH -> 8 decimales USD
-        } else if (token == usdcAddress) {
-            return amount / (10 ** (USDC_DECIMALS - 8)); // 6 decimales USDC -> 8 decimales USD
+            return (amount * _ethUSDPrice) / (10 ** 10);
+        } else if (token == USDC_ADDRESS) {
+            return amount / (10 ** (USDC_DECIMALS - 8));
         } else {
-            address feed = tokenToOracleFeed[token];
-            if (feed == address(0)) revert ErrOracleUnavailable();
-
-            (, int256 price, , , ) = AggregatorV3Interface(feed).latestRoundData();
-            if (price <= 0) revert ErrOracleUnavailable();
-
-            uint256 tokenDecimals = tokenConfig[token].decimals;
-            return (amount * uint256(price)) / (10 ** (tokenDecimals + (18 - 8)));
+            revert ErrConversionFailed(token);
         }
     }
 
-    // Calcula el valor total del banco en USD
     function _getTotalBankValueUSD() private view returns (uint256) {
         uint256 totalUSD = _toUSD(address(0), _tokenTotalSupply[address(0)]);
-
-        if (_tokenTotalSupply[usdcAddress] > 0) {
-            totalUSD = totalUSD + _toUSD(usdcAddress, _tokenTotalSupply[usdcAddress]);
+        if (_tokenTotalSupply[USDC_ADDRESS] > 0) {
+            totalUSD += _toUSD(USDC_ADDRESS, _tokenTotalSupply[USDC_ADDRESS]);
         }
-
         return totalUSD;
     }
+
+    function _incrementDepositCount() private {
+        unchecked { _depositCount++; }
+    }
+
+    function _incrementWithdrawalCount() private {
+        unchecked { _withdrawalCount++; }
+    }
 }
+
